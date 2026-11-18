@@ -5,11 +5,17 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field
 import os
 from pathlib import Path
+
+from .auth import (
+    COOKIE_NAME, SESSION_SECONDS, authenticate, current_teacher,
+    require_teacher, session_lock, sessions,
+)
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -88,7 +94,45 @@ def get_activities():
     return activities
 
 
-@app.post("/activities/{activity_name}/signup")
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+@app.post("/auth/login")
+def login(credentials: LoginRequest, response: Response,
+          teacher_session: str | None = Cookie(default=None, alias=COOKIE_NAME)):
+    token = authenticate(credentials.username, credentials.password)
+    with session_lock:
+        if teacher_session:
+            sessions.pop(teacher_session, None)
+    response.set_cookie(
+        COOKIE_NAME, token, max_age=SESSION_SECONDS, httponly=True,
+        secure=os.environ.get("TEACHER_COOKIE_SECURE", "true").lower() != "false",
+        samesite="strict",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {"username": credentials.username}
+
+
+@app.get("/auth/session")
+def get_session(response: Response, username: str | None = Depends(current_teacher)):
+    response.headers["Cache-Control"] = "no-store"
+    return {"username": username}
+
+
+@app.post("/auth/logout")
+def logout(response: Response,
+           teacher_session: str | None = Cookie(default=None, alias=COOKIE_NAME)):
+    with session_lock:
+        if teacher_session:
+            sessions.pop(teacher_session, None)
+    response.delete_cookie(COOKIE_NAME, httponly=True, samesite="strict")
+    response.headers["Cache-Control"] = "no-store"
+    return {"message": "Logged out"}
+
+
+@app.post("/activities/{activity_name}/signup", dependencies=[Depends(require_teacher)])
 def signup_for_activity(activity_name: str, email: str):
     """Sign up a student for an activity"""
     # Validate activity exists
@@ -110,7 +154,7 @@ def signup_for_activity(activity_name: str, email: str):
     return {"message": f"Signed up {email} for {activity_name}"}
 
 
-@app.delete("/activities/{activity_name}/unregister")
+@app.delete("/activities/{activity_name}/unregister", dependencies=[Depends(require_teacher)])
 def unregister_from_activity(activity_name: str, email: str):
     """Unregister a student from an activity"""
     # Validate activity exists

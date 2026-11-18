@@ -3,15 +3,127 @@ document.addEventListener("DOMContentLoaded", () => {
   const activitySelect = document.getElementById("activity");
   const signupForm = document.getElementById("signup-form");
   const messageDiv = document.getElementById("message");
+  const signupContainer = document.getElementById("signup-container");
+  const studentNotice = document.getElementById("student-notice");
+  const accountToggle = document.getElementById("account-toggle");
+  const accountPanel = document.getElementById("account-panel");
+  const accountStatus = document.getElementById("account-status");
+  const loginButton = document.getElementById("login-button");
+  const logoutButton = document.getElementById("logout-button");
+  const loginDialog = document.getElementById("login-dialog");
+  const loginForm = document.getElementById("login-form");
+  const loginError = document.getElementById("login-error");
+  const loginSubmit = document.getElementById("login-submit");
+  let teacher = null;
+
+  function escapeHTML(value) {
+    return String(value).replace(/[&<>"']/g, (character) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[character]);
+  }
+
+  function updateAccount(username) {
+    teacher = username;
+    signupContainer.classList.toggle("hidden", !teacher);
+    studentNotice.classList.toggle("hidden", !!teacher);
+    loginButton.classList.toggle("hidden", !!teacher);
+    logoutButton.classList.toggle("hidden", !teacher);
+    accountStatus.textContent = teacher ? `Logged in as ${teacher}` : "Not logged in";
+  }
+
+  async function loadSession() {
+    const response = await fetch("/auth/session", { cache: "no-store" });
+    if (!response.ok) throw new Error("Unable to check teacher login");
+    const session = await response.json();
+    updateAccount(session.username);
+  }
+
+  async function handleExpiredSession() {
+    updateAccount(null);
+    await fetchActivities();
+  }
+
+  accountToggle.addEventListener("click", () => {
+    const expanded = accountToggle.getAttribute("aria-expanded") !== "true";
+    accountToggle.setAttribute("aria-expanded", String(expanded));
+    accountPanel.classList.toggle("hidden", !expanded);
+  });
+
+  loginButton.addEventListener("click", () => {
+    loginError.textContent = "";
+    loginDialog.showModal();
+  });
+
+  function clearLoginForm() {
+    loginForm.reset();
+    loginError.textContent = "";
+  }
+
+  document.getElementById("login-cancel").addEventListener("click", () => {
+    loginDialog.close();
+  });
+  loginDialog.addEventListener("close", clearLoginForm);
+
+  loginForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    loginSubmit.disabled = true;
+    loginError.textContent = "";
+    try {
+      const response = await fetch("/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: document.getElementById("username").value,
+          password: document.getElementById("password").value,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        loginError.textContent = result.detail || "Unable to log in";
+        document.getElementById("password").value = "";
+        return;
+      }
+      await loadSession();
+      if (!teacher) {
+        loginError.textContent = "Your browser did not accept the login cookie. Contact the administrator.";
+        return;
+      }
+      loginDialog.close();
+      await fetchActivities();
+    } catch (error) {
+      loginError.textContent = "Unable to log in. Please try again.";
+      console.error("Login failed:", error);
+    } finally {
+      loginSubmit.disabled = false;
+    }
+  });
+
+  logoutButton.addEventListener("click", async () => {
+    try {
+      const response = await fetch("/auth/logout", { method: "POST" });
+      if (!response.ok) throw new Error("Logout request failed");
+      updateAccount(null);
+      signupForm.reset();
+      await fetchActivities();
+      messageDiv.textContent = "Logged out";
+      messageDiv.className = "info";
+    } catch (error) {
+      messageDiv.textContent = "Unable to log out. Please try again.";
+      messageDiv.className = "error";
+      console.error("Logout failed:", error);
+    }
+  });
 
   // Function to fetch activities from API
   async function fetchActivities() {
     try {
       const response = await fetch("/activities");
+      if (!response.ok) throw new Error("Unable to load activities");
       const activities = await response.json();
 
       // Clear loading message
       activitiesList.innerHTML = "";
+      activitySelect.replaceChildren(new Option("-- Select an activity --", ""));
 
       // Populate activities list
       Object.entries(activities).forEach(([name, details]) => {
@@ -30,7 +142,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 ${details.participants
                   .map(
                     (email) =>
-                      `<li><span class="participant-email">${email}</span><button class="delete-btn" data-activity="${name}" data-email="${email}">❌</button></li>`
+                      `<li><span class="participant-email">${escapeHTML(email)}</span>${teacher ? `<button class="delete-btn" data-activity="${escapeHTML(name)}" data-email="${escapeHTML(email)}" aria-label="Unregister ${escapeHTML(email)}">❌</button>` : ""}</li>`
                   )
                   .join("")}
               </ul>
@@ -38,9 +150,9 @@ document.addEventListener("DOMContentLoaded", () => {
             : `<p><em>No participants yet</em></p>`;
 
         activityCard.innerHTML = `
-          <h4>${name}</h4>
-          <p>${details.description}</p>
-          <p><strong>Schedule:</strong> ${details.schedule}</p>
+          <h4>${escapeHTML(name)}</h4>
+          <p>${escapeHTML(details.description)}</p>
+          <p><strong>Schedule:</strong> ${escapeHTML(details.schedule)}</p>
           <p><strong>Availability:</strong> ${spotsLeft} spots left</p>
           <div class="participants-container">
             ${participantsHTML}
@@ -72,6 +184,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const button = event.target;
     const activity = button.getAttribute("data-activity");
     const email = button.getAttribute("data-email");
+    if (!teacher) return;
 
     try {
       const response = await fetch(
@@ -92,6 +205,7 @@ document.addEventListener("DOMContentLoaded", () => {
         // Refresh activities list to show updated participants
         fetchActivities();
       } else {
+        if (response.status === 401) await handleExpiredSession();
         messageDiv.textContent = result.detail || "An error occurred";
         messageDiv.className = "error";
       }
@@ -113,6 +227,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Handle form submission
   signupForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (!teacher) return;
 
     const email = document.getElementById("email").value;
     const activity = document.getElementById("activity").value;
@@ -137,6 +252,7 @@ document.addEventListener("DOMContentLoaded", () => {
         // Refresh activities list to show updated participants
         fetchActivities();
       } else {
+        if (response.status === 401) await handleExpiredSession();
         messageDiv.textContent = result.detail || "An error occurred";
         messageDiv.className = "error";
       }
@@ -156,5 +272,16 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   // Initialize app
-  fetchActivities();
+  async function initialize() {
+    try {
+      await loadSession();
+    } catch (error) {
+      updateAccount(null);
+      messageDiv.textContent = "Unable to check teacher login. Reload the page to try again.";
+      messageDiv.className = "error";
+      console.error("Session check failed:", error);
+    }
+    await fetchActivities();
+  }
+  initialize();
 });
